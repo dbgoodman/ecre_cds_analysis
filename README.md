@@ -1,7 +1,6 @@
 ecre_cds_analysis
 =================
 
-<<<<<<< HEAD
 Chip-based Library of E. coli Regulatory and Coding Elements 
 
 ### Testing
