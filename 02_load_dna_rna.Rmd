@@ -1,0 +1,751 @@
+<link href="http://kevinburke.bitbucket.org/markdowncss/markdown.css" rel="stylesheet"></link>
+``` {r setup, include=FALSE}
+opts_chunk$set(warnings = FALSE, message = FALSE)
+require(ggplot2)
+require(plyr)
+require(reshape)
+require(xtable)
+load(file=paste(getwd(),"/rdata/01.Rdata", sep=''))
+```
+
+# Step 02: Loading and Processing Bowtie Alignment Data
+
+Using the `chiptools` python package that I wrote, I have created a list of unique trimmed and merge reads (contigs) and the number of times they appear in each replicate library. For the 202 analysis I used `rna_table.py` in the chiptools package to create RNA/DNA measurements and remove spurrious contigs. For 203, we will use R instead, so we can be more thorough in checking. Also because while Python is the bee's knees, PANDAS is slow, lame, and missing functionality. 
+
+## Getting limits on RNA and DNA lengths
+
+In order to throw away spurrious reads and avoid wasting time on alignments, we want to know what the shortest and longest legitimate RNA and DNA alignments are. We can use the `lib_seqs` DataFrame that we computed in `01`. 
+
+```{r 02.01-get_rna_max_len}
+
+seq_cols <- grep('.seq',names(lib_seqs))
+lib_seqs$Length <- nchar(apply(apply(lib_seqs[,seq_cols], 1, as.character), 
+    2, paste, collapse=''))
+
+table(lib_seqs$Length)
+```
+
+### DNA min/max lengths
+
+All of the library members are between 91 and 94 bases. For the DNA, we just check that all sequences are between 91 and 94 bases. 
+
+* **DNA min/max - 91,94**
+
+### RNA min/max lengths
+
+For the RNA, we want to throw away anything that might be DNA (too long) and also throw away anything that is too short. 
+
+If it is too short then the promoter won't be identifiable. Since we saw in `01` that the RBS length is between 18 and 21, and we only one base of the barcode, since we only have two promoters. It might be a good idea to make sure that one of the three allowed mismatches is not the last base of the barcode. Therefore the shortest RNA allowed should be 33 (CDS) + 18 (shortest RBS) + 1 (last base of barcode) = 52.
+
+If it is more than 90 bases, then it could possibly be DNA, so we'll remove it. If it is less than 90, then it could be DNA with deletions, but since bowtie only matches with mismatches (not indels) we should be safe from that. 
+
+* **RNA min/max - 52,90**
+
+Finally, I am also filtering on there being at least 4 reads for a unique 
+read, meaning we need to see two reads on average in each replicate.
+
+## Running Bowtie on RNA and DNA
+
+This was done on the `GMC` server, but I am putting the shell code that I ran here.
+
+### Bowtie Settings
+
+`-k 114` | report up to 114 alignments per contig
+`-v 3` | 3 mismatches per contig (no indels)
+`-l 10` | seed length of 10
+`-p 16` | use all 16 processors
+
+### Input 
+
+My read names are 4 tab-separated fields, read number, count, bin 1, bin 2. They are in FASTA format; the perl takes them as they get fed into bowtie and filters them for size. 
+
+### File Locations on GMC
+
+```bash
+lib_prefix=/scratch/dbg/ecre/fa/203.norestrict
+out_prefix=/scratch/dbg/ecre/203_hs
+dna_prefix=/scratch/dbg/ecre/ct/203_hsdna/203_hsdna.counts
+rna_prefix=/scratch/dbg/ecre/ct/203_hsrna/203_hsrna.counts
+```
+
+### Some read length distribution analysis
+
+Using some bash scripting I got the RNA and DNA contig length distributions before filtering:
+
+```console
+
+$ perl -pe 's/([^ATGC])\n/$1\t/' $dna_prefix.fa | perl -ne '@l = split; print length($l[4])."\n";' | sort -nr | uniq -c
+
+$ perl -pe 's/([^ATGC])\n/$1\t/' $rna_prefix.fa | perl -ne '@l = split; print length($l[4])."\n";' | sort -nr | uniq -c
+```
+
+These of course contain the spike-ins for the 202 library, so we have to keep that in mind, but it is interesting nonetheless. I cleaned up the output and made them into tsvs, and put them in `data/203.dna_hist.txt` and `data/203.rna_hist.txt`. 
+
+```{r 02.02-read_length_hist, fig.width=7, fig.height=5}
+#load the text files I made with bash scripts
+dna_read_lengths <- read.table(file=paste(getwd(),"/data/203.dna_hist.txt", 
+    sep=''), sep="\t", header=T, row.names= NULL,
+    col.names= c('count','length'))
+rna_read_lengths <- read.table(file=paste(getwd(),"/data/203.rna_hist.txt", 
+    sep=''), sep="\t", header=T, row.names= NULL,
+    col.names= c('count','length'))
+
+#combine them into one DF
+read_lengths <- melt(merge(dna_read_lengths, rna_read_lengths, by='length', 
+    suffixes=c('.dna','.rna')), id.vars='length')
+
+#plot
+ggplot(read_lengths, aes(x=length, y=value)) + 
+    geom_line(aes(colour=variable)) + 
+    scale_y_log10(breaks=10^(1:6), name='contig count (log10)') +
+    scale_x_continuous(name='length (bp)')
+```
+
+This looks right; there is a big hump for the RNA at about 55 bp, and most of the DNA looks like it is around 91 to 94 bp. The hump for the RNA in that same region is maybe DNA contamination. The longer things (100+ bp) are perhaps concatamers, but it is unclear. It is interesting how much junk there is in the DNA. As I mentioned, the 202 library is adding some peaks (perhaps the jagged ones between 30 and 50 bp). 
+
+### Run Bowtie
+
+> Note: the RNA/DNA min/max I arrived at above are hard-coded in the perl below.  
+
+```bash
+#build the bowtie index
+bowtie-build /scratch/dbg/ecre/fa/203.norestrict.fa \
+    /scratch/dbg/ecre/fa/203.norestrict
+
+#perform bowtie for DNA
+bowtie -v 3 -l 10 -k 114 -p 16 \
+    --norc --best --strata --suppress 2,6 \
+    --un $out_prefix.unmapped.fa -f $lib_prefix  \
+    <(perl -pe 's/([^ATGC])\n/$1\t/' $dna_prefix.fa \
+    | perl -ne '@l = split; ($l[1] > 4
+        && length($l[4]) <= 94 && length($l[4]) >= 91) 
+        && (s/\t([ATGC])/\n$1/ && print);') \
+    > $out_prefix.dna.bowtie
+        
+#perform bowtie for RNA
+bowtie -v 3 -l 10 -k 114 -p 16 \
+    --norc --best --strata --suppress 2,6 \
+    --un $out_prefix.unmapped.fa -f $lib_prefix  \
+    <(perl -pe 's/([^ATGC])\n/$1\t/' $rna_prefix.fa \
+    | perl -ne '@l = split; ($l[1] > 4
+        && length($l[4]) < 90 && length($l[4]) > 52) 
+        && (s/\t([ATGC])/\n$1/ && print);') \
+    > $out_prefix.rna.bowtie
+```
+
+### Bowtie Output Summaries
+For DNA:
+```
+# reads processed: 1140587
+# reads with at least one reported alignment: 837696 (73.44%)
+# reads that failed to align: 302891 (26.56%)
+Reported 842175 alignments to 1 output stream(s)
+```
+For RNA:
+```
+# reads processed: 1028684
+# reads with at least one reported alignment: 663124 (64.46%)
+# reads that failed to align: 365560 (35.54%)
+Reported 689549 alignments to 1 output stream(s)
+```
+
+More contigs failed to align than I expected, but some may be due to the 202 spike-in library. I copied `/scratch/dbg/ecre/*.bowtie` to the project, though the files were pretty big. I put them in the `data/` dir and will add them to the `.gitignore` file.
+
+### Output Format
+
+More info can be found in the online [Bowtie docs](http://bowtie-bio.sourceforge.net/manual.shtml#default-bowtie-output).
+
+```
+01 Name of read that aligned
+02 Total read count
+03 Read count in bin 1
+04 Read count in bin 2
+(suppressed) Reference strand aligned to
+05 Name of reference sequence where alignment occurs
+06 0-based offset into the forward reference strand 
+07 Read sequence
+(suppressed) Read qualities
+08 Number of other alignments for this RNA
+09 Mismatches (base:N>N, ... )
+```
+
+## Annotating the Bowtie Output
+
+Now I want to follow the path I took in `rna_table.py`. There are several steps required for both RNA and DNA:
+1. Get the sequence length 
+2. Get the corresponding library member length
+3. Get the righthand offset from the lefthand offset and member length
+
+Additionally, only keep RNA that has:
+1. a single best alignment
+2. an offset of at least 2
+
+For DNA:
+1. a single best alignment
+2. aligns end to end (left and right offset of 0)
+
+```{r 02.03-load_raw_aligns, cache=TRUE}
+
+#load the raw bowtie output, add library annotation data, and get lengths and 
+# offset info
+load_raw_reads <- function (filename, is.rna) {
+    raw <- read.table(file=filename, sep="\t", header=T, row.names= NULL,
+        stringsAsFactors= F,
+        col.names= c('Read.num', 'Count', 'Count.A', 'Count.B',
+            'Name', 'Offset.L', 'Read.seq', 'Alts', 'Mismatches'))
+
+    raw <- merge(raw, lib_seqs, by='Name')
+    raw$Read.len <- nchar(raw$Read.seq)
+    raw$Offset.R <- raw$Length - raw$Read.len - raw$Offset.L
+    
+    raw$Mismatches.len <- unlist(lapply(raw$Mismatches, 
+        function(x) length(unlist(strsplit(x, ',', fixed=T)))))
+    
+    return(raw)
+} 
+
+dna.raw <- load_raw_reads(file=paste(getwd(),"/data/203.dna.bowtie",sep=''),
+    is.rna=F)
+rna.raw <- load_raw_reads(file=paste(getwd(),"/data/203.rna.bowtie",sep=''),
+    is.rna=T)
+
+```
+
+Also, we should get the RNA start position relative to the Promoter/RBS junction. Take the left offset and subtract 40, the length of promoter (constant between the two).
+
+```{r}
+rna.raw$Offset.RBS <- with(rna.raw, Offset.L - 40)
+```
+### Exploratory Plots
+
+Before we filter, let's just look at some plots. 
+
+```{r 02.04-plot_raw_aligns, fig.width=9, fig.height=7}
+
+ggplot(rna.raw, aes(x=Offset.L)) + 
+    geom_bar(aes(fill=cut(rna.raw$Alts, breaks=c(-Inf, 0, 1, 100, Inf), 
+        labels=c('None','One','> 1','> 100')))) + 
+    scale_x_continuous(name='Left Offset of RNA') + 
+    scale_fill_discrete(name = "Number of Alternate Alignments")
+
+ggplot(rna.raw, aes(x=Offset.R)) + 
+    geom_bar(aes(fill=cut(rna.raw$Alts, breaks=c(-Inf, 0, 1, 100, Inf), 
+        labels=c('None','One','> 1','> 100')))) + 
+    scale_x_continuous(limits=c(1, 50), 
+        name='Right Offset of RNA (hiding 0)') + 
+    scale_fill_discrete(name = "Number of Alternate Alignments")
+
+ggplot(subset(melt(cast(rna.raw, Alts ~ Promoter, fill=NA)), !is.na(value)), 
+    aes(x=Alts, y=Promoter, fill=log10(value))) + geom_tile()
+
+ggplot(subset(melt(cast(rna.raw, Alts ~ RBS, fill=NA)), !is.na(value)), 
+    aes(x=Alts, y=RBS, fill=log10(value))) + geom_tile()
+
+ggplot(subset(melt(cast(rna.raw, Alts ~ Offset.L, fill=NA)), !is.na(value)), 
+    aes(x=Alts, y=Offset.L)) + geom_point()
+
+ggplot(subset(melt(cast(rna.raw, Alts ~ Offset.R, value='Name', fill=NA)), 
+    !is.na(value)), aes(x=Alts, y=Offset.R)) + geom_point()
+
+ggplot(subset(melt(cast(rna.raw, Alts ~ Mismatches.len, value='Name', 
+        fill=NA)), !is.na(value)), 
+        aes(x=Alts, y=Mismatches.len, fill= log10(value))) +
+    geom_tile()
+
+ggplot(subset(melt(cast(rna.raw, Offset.L ~ Offset.R, value='Name', fill=NA)), 
+    !is.na(value)), aes(x=Offset.L, y=Offset.R, fill= log10(value))) +
+    geom_tile()
+```
+
+So, a lot is going on here. 
+
+* Most of the reads with multiple alignments have a left offset of 40 or greater, corresponding to a late RNA start perhaps. 
+* The `BBaJ23108` promoter has a lot more multiple alignments than `BBaJ23100`.
+* There are also differences in multiple alignments per RBS, with `BB0030` having the most, and the WT having none of the super-high multiple aligners (aligning to 120 seqs).
+
+## Filtering contigs
+
+We could make these plots all night, but let's just subset based on our aforementioned criteria and see where we are. 
+
+
+```{r 02.05-subset_raw_aligns, cache=TRUE}
+
+rna.criteria <- with(rna.raw, Alts==0 & Offset.L  > 2 & Offset.R == 0)
+dna.criteria <- with(dna.raw, Alts==0 & Offset.L == 0 & Offset.R == 0)
+
+rna.subset <- subset(rna.raw, rna.criteria)
+dna.subset <- subset(dna.raw, dna.criteria)
+
+rna.discard <- subset(rna.raw, !rna.criteria)
+dna.discard <- subset(dna.raw, !dna.criteria)
+
+
+#Before and after Subsetting:
+print(xtable(rbind(
+    dna= cbind('read'='dna', 'before subset'=dim(dna.raw)[1], 
+               'after subset'=dim(dna.subset)[1]),
+    rna= cbind('read'='rna', 'before subset'=dim(rna.raw)[1], 
+               'after subset'=dim(rna.subset)[1]))), "html")
+
+#Missing from DNA
+dna.missing <- lib_seqs$Name[which(!(lib_seqs$Name %in% dna.subset$Name))]
+dna.missing
+
+#Missing from RNA
+rna.missing <- lib_seqs$Name[which(!(lib_seqs$Name %in% rna.subset$Name))]
+rna.missing
+                      
+#Missing from both
+both.missing <- lib_seqs$Name[which(!(lib_seqs$Name %in% dna.subset$Name | 
+    lib_seqs$Name %in% rna.subset$Name))]
+both.missing
+
+```
+28 are missing from both, 43 are missing from DNA, and 45 are missing from RNA. Let's see if they appear in the unfiltered reads.
+
+## Recovering Lost Contigs
+
+```{r}
+rna.reads_for_missing <- subset(rna.raw, Read.num %in% subset(rna.raw, Name %in% rna.missing & Count > 200)$Read.num)[,!grepl('seq', names(rna.raw))]
+rna.reads_for_missing[order(rna.reads_for_missing$Read.num),]
+```
+
+### Duplicate Library Members
+
+It looks like there are some high-count reads that map doubly. It appears that some of the Min Rare CDSes have the exact same sequences as the ∆G RBSes. To confirm, I will check the original library FASTA file. 
+
+```console
+$ grep -Pi '^[ATGC]+' $lib_prefix.fa | sort | uniq -c | grep -Pv '^\s+1'      2 ctgacagctagctcagtcctaggtataatgctagcCACCGAGGGAAACAGATAACAGGTTATGGTGACCCATCGCCAGCGCTATCGCGAAAAA
+      2 ctgacagctagctcagtcctaggtataatgctagcCACCGATGTCTAAACGGAATCTTCGATGCTGAAAATTTTTAACACCCTGACCCGCCAG
+      2 ctgacagctagctcagtcctaggtataatgctagcCACCGATTAAAGAGGAGAAAtactagATGCTGGATCCGAACCTGCTGCGCAACGAACCG
+      2 ctgacagctagctcagtcctaggtataatgctagcCACCGGCTAAGTTAAGGGATATCTCATGCGCACCGAATATTGCGGCCAGCTGCGCCTG
+      2 ctgacagctagctcagtcctaggtataatgctagcCACCGTCACACAGGAAAGtactagATGAAAAAAATTGCGATTACCTGCGCGCTGCTG
+      2 ctgacagctagctcagtcctaggtataatgctagcCACCGTCACACAGGAAAGtactagATGACCGATAACCCGAACAAAAAAACCTTTTGG
+      2 ctgacagctagctcagtcctaggtataatgctagcCACCGTCACACAGGAAAGtactagATGGCGACCGTGAGCATGCGCGATATGCTGAAA
+      2 ttgacggctagctcagtcctaggtacagtgctagcTTAATAGGGAAACAGATAACAGGTTATGGTGACCCATCGCCAGCGCTATCGCGAAAAA
+      2 ttgacggctagctcagtcctaggtacagtgctagcTTAATATGTCTAAACGGAATCTTCGATGCTGAAAATTTTTAACACCCTGACCCGCCAG
+      2 ttgacggctagctcagtcctaggtacagtgctagcTTAATATTAAAGAGGAGAAAtactagATGCTGGATCCGAACCTGCTGCGCAACGAACCG
+      2 ttgacggctagctcagtcctaggtacagtgctagcTTAATGCTAAGTTAAGGGATATCTCATGCGCACCGAATATTGCGGCCAGCTGCGCCTG
+      2 ttgacggctagctcagtcctaggtacagtgctagcTTAATTCACACAGGAAAGtactagATGAAAAAAATTGCGATTACCTGCGCGCTGCTG
+      2 ttgacggctagctcagtcctaggtacagtgctagcTTAATTCACACAGGAAAGtactagATGACCGATAACCCGAACAAAAAAACCTTTTGG
+      2 ttgacggctagctcagtcctaggtacagtgctagcTTAATTCACACAGGAAAGtactagATGGCGACCGTGAGCATGCGCGATATGCTGAAA
+      
+$ grep -Pi '^[ATGC]+' $lib_prefix.fa | sort | uniq -c | grep -Pv '^\s+1' | wc -l
+```
+
+There are indeed 14 pairs of sequences that are not unique. Looking at the dataframe printout above, there are 28 genes where the Min Rare CDS sequence is the same as one of the ∆G types. Here are their names:
+
+```console
+$ grep -Pi '^[ATGC]+' $lib_prefix.fa | sort | uniq -c | grep -P '^\s+2' | \
+    | perl -ne '@l = split; print $l[1]."\n"' | grep -B1 -f - $lib_prefix.fa \
+    | grep -P '^>' | sort
+>BBaJ23100-aspS-16
+>BBaJ23100-aspS-5
+>BBaJ23100-cysS-18
+>BBaJ23100-cysS-5
+>BBaJ23100-lolA-41
+>BBaJ23100-lolA-7
+>BBaJ23100-mrdB-39
+>BBaJ23100-mrdB-7
+>BBaJ23100-rpsB-40
+>BBaJ23100-rpsB-7
+>BBaJ23100-serS-27
+>BBaJ23100-serS-6
+>BBaJ23100-yejM-15
+>BBaJ23100-yejM-5
+>BBaJ23108-aspS-16
+>BBaJ23108-aspS-5
+>BBaJ23108-cysS-18
+>BBaJ23108-cysS-5
+>BBaJ23108-lolA-41
+>BBaJ23108-lolA-7
+>BBaJ23108-mrdB-39
+>BBaJ23108-mrdB-7
+>BBaJ23108-rpsB-40
+>BBaJ23108-rpsB-7
+>BBaJ23108-serS-27
+>BBaJ23108-serS-6
+>BBaJ23108-yejM-15
+>BBaJ23108-yejM-5
+```
+
+Filtering on exact matches (no right offset, no mismatches) with Alts > 0, here they are in R:
+
+```{r}
+
+#get reads that align perfectly to constructs missing from the subset
+rna.reads_for_missing <- subset(rna.raw, 
+    Read.num %in% subset(rna.raw, 
+        Name %in% rna.missing & 
+        Alts > 0 & 
+        Offset.R == 0 & 
+        Mismatches.len == 0 & 
+        Offset.RBS < 0)$Read.num)[,!grepl('seq', names(rna.raw))]
+
+#print df ordered by read number
+cols_to_show <- names(rna.reads_for_missing)[
+    !(names(rna.reads_for_missing) %in% 
+    c('Length','RBS.len','Offset.R','Mismatches.len','Mismatches'))]
+
+rna.reads_for_missing[order(rna.reads_for_missing$Read.num),
+    cols_to_show]
+
+length(unique(rna.reads_for_missing$Name))
+
+```
+
+So R agrees that we have 28 duplicates. I'm not sure what we should do about it however. It's likely that having the same sequence twice will cause more problems than just this 'alternate' problem. I think the best solution would be to remove the 14 ∆G sequences from the library, and keep the 14 identical Min Rare ones.  
+
+We need to remove them from the lib_seqs library as well as the DNA and RNA read sets. 
+
+``` {r 02.06-resubset, cache=TRUE}
+
+seqs_to_remove <- unique(subset(rna.raw, 
+   Name %in% rna.missing & 
+   Alts > 0 & 
+   Offset.R == 0 &
+   CDS.type != 'Min Rare' & 
+   Offset.RBS < 0)$Name)
+
+seqs_to_keep <- unique(subset(rna.raw, 
+   Name %in% rna.missing & 
+   Alts > 0 & 
+   Offset.R == 0 &
+   CDS.type == 'Min Rare' & 
+   Offset.RBS < 0)$Name)
+
+#remove 14 duplicate sequences from library
+lib_seqs <- lib_seqs[-which(lib_seqs$Name %in% seqs_to_remove),]
+table(lib_seqs$CDS.type)
+
+#create a boolean to keep the Min Rare sequences even if their Alts are > 0
+rna.alt_crit <- with(rna.raw, Alts == 0 | Name %in% seqs_to_keep)
+dna.alt_crit <- with(dna.raw, Alts == 0 | Name %in% seqs_to_keep)
+
+rna.criteria <- with(rna.raw, rna.alt_crit & Offset.L  > 2 & Offset.R == 0)
+dna.criteria <- with(dna.raw, dna.alt_crit & Offset.L == 0 & Offset.R == 0)
+
+rna.subset <- subset(rna.raw, rna.criteria)
+dna.subset <- subset(dna.raw, dna.criteria)
+```
+
+### Remaining missing library members
+
+Now that we've dealt with the 28 duplicates, lets see how many problem sequences remain and if we can track them down.
+
+```{r}
+#Missing from DNA
+dna.missing <- lib_seqs$Name[which(!(lib_seqs$Name %in% dna.subset$Name))]
+dna.missing
+
+#Missing from RNA
+rna.missing <- lib_seqs$Name[which(!(lib_seqs$Name %in% rna.subset$Name))]
+rna.missing
+                      
+#Missing from both
+both.missing <- lib_seqs$Name[which(!(lib_seqs$Name %in% dna.subset$Name | 
+    lib_seqs$Name %in% rna.subset$Name))]
+both.missing
+```
+
+None are missing from both RNA and DNA. 15 are missing from DNA, 17 are missing from RNA. 
+
+### Missing RNA have low counts and high R offsets
+
+Printed out this table to see what was left that didn't align properly (hidden):
+```{r}
+rna.reads_for_missing <- subset(rna.raw, Read.num %in% subset(
+    rna.raw, Name %in% rna.missing)$Read.num)[,!grepl('seq', names(rna.raw))]
+rna.reads_for_missing <- rna.reads_for_missing[order(
+    rna.reads_for_missing$Read.num),]
+```
+
+For the remaining RNA reads, nothing maps with high read counts, so I think we are OK:
+
+```{r}
+ggplot(rna.reads_for_missing, aes(x=Count)) + 
+    geom_bar() + 
+    scale_y_continuous(name='Number of Unique Reads')
+```
+
+The majority also have right-hand offsets that are pretty high:
+
+```{r}
+table(with(rna.reads_for_missing, Offset.R))
+```
+
+I don't see any major problems here, although I am curious as to the extent of RNA reads (and DNA reads for that matter) that have high R offsets. The only thing I can think of that would cause them is truncation of the oligos during synthesis. I have a feeling that there are more of these and will check that later.
+
+### Missing DNA
+
+```{r}
+dna.reads_for_missing <- subset(dna.raw, Read.num %in% subset(
+    dna.raw, Name %in% dna.missing)$Read.num)[,!grepl('seq', names(dna.raw))]
+dna.reads_for_missing <- dna.reads_for_missing[order(
+    dna.reads_for_missing$Read.num),]
+nrow(dna.reads_for_missing)
+```
+
+They are all BamA sequences. There are no misaligned reads, they just do not appear. Very strange, but we'll let it go for now. Interestingly, there are RNAs for these sequences:
+
+```{r fig.width=9, fig.height=5}
+ggplot(subset(rna.subset, Name %in% dna.missing), aes(x=Count)) +
+    geom_bar() + scale_y_continuous(name='Number of unique RNA sequences') +
+    scale_x_log10(name="Read count per sequence") +
+    opts(title='RNA read counts for constructs with no DNA reads')
+```
+
+## Some Final QC of RNA and DNA Data
+
+Before moving on to the processing and RNA ratio estimation, there are some important questions remaining to ask.
+
+* How many reads are we losing after we filter based on alignment quality and uniqueness?
+* Of those reads, how many are due to right offset being non-zero?
+* How many align non-uniquely because the left offset is too high (i.e. past the barcode)? Are there a few constructs in particular that this occurs to most often?
+* What are the mismatch breakdowns? What percentage of reads do sequences with 1, 2 and 3 mismatches contribute to the total read count per sequence? Are there any outliers where the majority of reads have mismatches?
+
+### How many reads we lost from filtering
+
+I mostly focus here on the RNA reads, but I do look at DNA reads for mismatch discrepancies at the end. Because DNA alignments are more straightforward (end to end) there is less to look at. 
+
+```{r}
+#Total RNA Read Count Before Filtering
+prettyNum(sum(rna.raw$Count), big.mark=",",scientific=F)
+
+#Total RNA Read Count After Filtering
+prettyNum(sum(rna.subset$Count), big.mark=",",scientific=F)
+
+#RNA Reads Lost
+prettyNum(sum(rna.raw$Count)-sum(rna.subset$Count), big.mark=",",scientific=F)
+```
+
+#### DNA contamination in RNA
+
+Not too bad; about 10%. In particular, did we lose any reads with a high number of constructs?
+
+It looks like half (57%) of the discarded reads are DNA (they have offset 2):
+
+```{r fig.width=9, figure.height=5}
+prettyNum(sum(subset(rna.discard, Offset.L == 2)$Count),
+    big.mark=",",scientific=F)
+
+ggplot(rna.discard, aes(x=Count, fill=(Offset.L == 2))) + 
+    geom_bar() + 
+    scale_x_log10(name="Read Count per Construct") + 
+    scale_y_continuous(name="Number of Unique RNA constructs") + 
+    opts(title="Read Count Distribution for Discarded RNA sequences") +
+    scale_fill_discrete(name="DNA contamination?")
+```
+
+#### Right Offset
+
+What about right offset? It looks like there aren't that meany 3' truncated reads:
+
+```{r fig.width=9, figure.height=5}
+prettyNum(sum(subset(rna.discard, Offset.R > 0)$Count),
+    big.mark=",",scientific=F)
+
+ggplot(rna.discard, aes(x=Count, fill=(Offset.R == 0))) + 
+    geom_bar() + 
+    scale_x_log10(name="Read Count per Construct") + 
+    scale_y_continuous(name="Number of Unique RNA constructs") + 
+    opts(title="Read Count Distribution for Discarded RNA sequences") +
+    scale_fill_discrete(name="Is the right offset 0?")
+```
+
+#### Late TSS
+
+What about reads past the barcode? The promoter is exactly 40 bases long, so an `Offset.RBS >= 0` means that we can't identify the promoter due to a late start site. We lose about 30% of all discarded reads this way.
+
+```{r fig.width=9, figure.height=5}
+prettyNum(sum(subset(rna.discard, Offset.L >= 40)$Count),
+    big.mark=",",scientific=F)
+
+ggplot(rna.discard, aes(x=Count, fill=(Offset.L < 40))) + 
+    geom_bar() + 
+    scale_x_log10(name="Read Count per Construct") + 
+    scale_y_continuous(name="Number of Unique RNA constructs") + 
+    opts(title="Read Count Distribution for Discarded RNA sequences") +
+    scale_fill_discrete(name="Discarded Reads have normal TSS")
+```
+
+Are there any constructs, Genes, CDSs, or RBSs that lose much more than their share of reads this due to late TSS?
+
+```{r 02.07-late_tss, cache=T}
+
+get_bad_tss_dist <- function (col) {
+    
+    bad_read_table <- ddply(subset(rna.discard, 
+            Offset.L >= 40)[,c(col, 'Count')], 
+        col, .drop=F, summarize, count=sum(Count), num=length(Count), 
+        avg=mean(Count))
+    
+    good_read_table <- ddply(rna.subset[,c(col, 'Count')], 
+        col, .drop=F, summarize, count=sum(Count), num=length(Count), 
+        avg=mean(Count))
+    
+    read_table <- merge(bad_read_table, good_read_table, by=col, 
+        suffixes=c('.bad','.good'), all.x=TRUE, all.y=FALSE)
+    
+    read_table$pct <- with(read_table, count.bad / count.good)
+    return(read_table[order(-read_table$pct),])
+}
+
+#RBSs
+get_bad_tss_dist('RBS')
+
+#CDSs
+get_bad_tss_dist('CDS.type')
+
+#Promoters
+get_bad_tss_dist('Promoter')
+
+#Genes
+get_bad_tss_dist('Gene')
+
+#Constructs
+head(get_bad_tss_dist(c('Gene','CDS.num')), n=20)
+
+```
+
+In the above tables, `count` is the number of total reads per RBS/CDS/Promoter/Gene, `num` is the number of constructs, `avg` is the mean counts/construct. `bad` are reads lost due to late start, `good` are successfully assigned reads. `pct` is the ratio of bad read counts to good read counts.
+
+#### Mismatches
+
+I checked the DNA and RNA for each RBS, Promoter, and CDS.type to see if there are any large differences between number of mismatches. I didn't find any (it's about 0-1-2-3:0.78-0.19-0.2-0.1), so I'm not executing this code block below. 
+
+```{r hinclude=F}
+mismatch_count <- function (df, col) {
+    table <- ddply(df, c('Mismatches.len',col), summarise, 
+        count=sum(Count))
+    table <- merge(table, ddply(table, col, summarize, tot=sum(count)))
+    table$pct <- table$count / table$tot
+    table <- cast(table,
+         as.formula(paste(col,'~ Mismatches.len')),
+         fun.aggregate=sum, value='pct')
+    table <- table[order(table$"0"),]
+    names(table) <- c(names(table)[1],paste('mm',0:3, sep=''))
+    return(table)
+}
+```
+
+```{r eval=FALSE}
+mismatch_count(rna.subset, 'RBS')
+mismatch_count(rna.subset, 'Promoter')
+mismatch_count(rna.subset, 'CDS.type')
+mismatch_count(rna.subset, 'Gene')
+
+mismatch_count(dna.subset, 'RBS')
+mismatch_count(dna.subset, 'Promoter')
+mismatch_count(dna.subset, 'CDS.type')
+```
+
+The one anomaly I did find was by gene for DNA mismatches by gene. There is quite a wide distribution; and there were many more mismatches (%50) than the RNA:
+
+```{r fig.width=9, figure.height=7}
+ggplot(mismatch_count(dna.subset, 'Gene'), aes(x=mm0)) + geom_bar() + scale_x_continuous("% of DNA reads w/ 0 mismatches")
+```
+
+The percent of perfect matches varies from **48% to 62%**. 
+
+Changes to the DNA sequence might change transcription and translation drastically, even by one base, and so it is potentially troublesome that there is such a wide range in reads with mismatches per gene. In contrast, the range for 0 mismatch RNA reads is from 75% to 81%. It might just be due to the greater size of DNA sequences (more opportunities for errors), but it is a little troubling. I wonder if we should only keep perfect sequences instead of 1-3 mismatches? We'd lose about 20% of our RNA and 45% of our DNA. 
+
+It might be interesting to take all the sequences with 1 mismatch and plot them across the sequence, to see where most mismatches lie. 
+
+```{r 02.08-dna_mismatch_pos, fig.width=9, fig.height=7, cache=T, warning=F}
+
+mismatch_dist <- data.frame(
+    mmd=unlist(lapply(strsplit(unlist(lapply(dna.subset$Mismatches, 
+    function(x) unlist(strsplit(x, ',', fixed=T)))),':',fixed=T), 
+    function (x) as.integer(x[1]))))
+
+#By unique reads:
+ggplot(mismatch_dist, aes(x=mmd)) + 
+    geom_histogram(binwidth=1) + 
+    scale_x_continuous(name="Mismatch position") + 
+    opts(title='DNA Mismatch position by unique contig')
+
+mismatch_by_count <- function (df) {
+    df$mm_set <- gsub(':[^,]+', '', df$Mismatches)
+    mm_sets <- ddply(df[,c('mm_set', 'Count')], 'mm_set', summarise, 
+        Count = sum(Count))
+    split_row <- function (row) data.frame(
+        pos=as.integer(unlist(strsplit(as.matrix(row[1]),','))), 
+        Count=row[2])
+    mm_sets <- ddply(mm_sets[-1,], 'mm_set', split_row)
+    mm_sets <- ddply(mm_sets, 'pos',summarise, Count=sum(Count))
+    return(mm_sets)
+}
+
+mm_dna_pos <- mismatch_by_count(dna.subset)
+
+#By counts:
+ggplot(mm_dna_pos, aes(x=pos, weight=Count)) + 
+    geom_histogram(binwidth=1) + 
+    scale_x_continuous(name="Mismatch position") + 
+    opts(title='DNA Mismatch position by read counts')
+
+```
+
+Woah. There are tons of errors from base 88 onward. Millions and millions of reads have mismatches in this region. Is synthesis that bad towards the end, or is something else amiss? I'm not sure what we should do about it. It's looking more and more like we should throw away RNA/DNA with any mismatches.
+
+Let's look at the RNA. The mismatch position won't be as useful since the offsets are all different, so we'll add the `Offset.L` position for each. 
+
+```{r 02.09-rna_mismatch_pos, fig.width=9, fig.height=7, cache=T, warning=F}
+
+mismatch_by_count_rna <- function (df) {
+    df <- subset(df, Mismatches.len > 0)
+    df$mm_set <- gsub(':[^,]+', '', df$Mismatches)
+    mm_sets <- ddply(df[,c('mm_set', 'Count','Offset.L')], 
+        c('mm_set','Offset.L'), summarise, 
+        Count = sum(Count))
+    split_row <- function (row) data.frame(
+        pos=as.integer(unlist(strsplit(row$mm_set,',')))+row$Offset.L, 
+        Count=row$Count)
+    mm_sets <- ddply(mm_sets, 'mm_set', split_row)
+    mm_sets <- ddply(mm_sets, 'pos',summarise, Count=sum(Count))
+    return(mm_sets)
+}
+
+mm_rna_pos <- mismatch_by_count_rna(rna.subset)
+
+#By counts:
+ggplot(mm_rna_pos, aes(x=pos, weight=Count)) + 
+    geom_histogram(binwidth=1) + 
+    scale_x_continuous(name="Mismatch position") + 
+    opts(title='RNA Mismatch position by read counts')
+
+```
+
+The RNA mismatch profile is also interesting. There are many mutations in the promoter region (30-40 bases in) and not as many in the 85+ region (though still double the rest of the CDS). 
+
+## Conclusions
+
+We're ready to move on, but there are still some odd things going on, and we might want to revisit this step, depending on how things go. 
+
+1. **14 Pairs of Duplicate Constructs**: 28 constructs were duplicates (14 pairs of 2), so I removed them from the construct library, keeping the `Max Rare` for each pair.
+
+2. **15 Construcs with no DNA reads**: They are all BamA sequences. Interestingly, there are no bad alignments for these 15 either. Just no alignments whatesoever. Even more interestingly, there ARE RNA alignments for all of them. Some unique RNA contigs for these 15 have read counts numbering into the hundreds and two over 1000. 
+
+3. **17 Constructs with no RNA reads**: There were some filtered RNA contigs for those constructs, but they had low read counts and many had high non-zero R-offsets (i.e. they didn't go to end of the sequence). They are all weak promoter constructs, so they are probably just weakly transcribed.
+
+4. **RNA reads are filtered for a variety of reasons**: ~60% are DNA contamination, ~10% have non-zero right offsets, ~30% have a late TSS and the promoter cannot be identified. 
+
+5. **There is a wide range of average mismatch counts per gene**: Almost all the constructs have 78% of their reads from perfect match contigs, 19% from contigs with 1 mismatch, 2% with 2 mismatches, and 1% with 3 mismatches. This holds for RNA and DNA. However, with DNA, per gene, there is an extremely wide range of reads coming from perfect constructs, from 48% to 62%. The same range for RNA sequences is 75% to 81%. 
+
+6. **DNA Mismatches occur predominantly at the end of the CDS**: Number of reads with mismatches at each of the 5-7 bases at the end of the RBS is extreme, about 3 million reads with mismatches per base. In contrast, none of the other positions have mismatches in more than 250,000 reads. This is striking and we should consider its effects.
+
+7. **RNA Mismatches occur predominantly around the end of the Promoter**: Four times the number of mismatches occur 33-40 bases into the constructs, corresponding to the end of the promoters. Could these mismatches be increasing the strengths of the promoters, and increasing the number of reads we see? We could be seeing a similar affect with the DNA above also, although the mechanism is less clear. 
+
+```{r 01-save, include=FALSE}
+save(list=c('rna.raw','dna.raw','dna.subset','rna.subset',
+            'mismatch_by_count_rna','mismatch_by_count','mm_rna_pos',
+            'mm_dna_pos','lib_seqs','rna.missing','dna.missing',
+            'rna.criteria','dna.criteria'),
+    file= paste(getwd(),"/rdata/02.Rdata", sep=''))
+
+
+```
+
+
+

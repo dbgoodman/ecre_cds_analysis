@@ -1,11 +1,11 @@
-<link href="http://kevinburke.bitbucket.org','/markdowncss/markdown.css" rel="stylesheet"></link>
-``` {r knitr-options, include=FALSE}
+<link href="http://kevinburke.bitbucket.org/markdowncss/markdown.css" rel="stylesheet"></link>
+``` {r setup, include=FALSE}
 opts_chunk$set(warnings = FALSE, message = FALSE)
 require(ggplot2)
 require(plyr)
 ```
 
-# Step 01 - Annotating Library Member Data Frame
+# Step 01: Annotating Library Member Data Frame
 
 ## Motivation
 
@@ -86,7 +86,8 @@ perl -ne 'chomp; s/^>((\w+)-(\w+)-(\d+))/\n$1\t$2\t$3\t$4/;
 Now we have to read `203.norestrict.txt` into R as a tab-delimited text file. 
 
 ```{r 01.01-load_libs, cache=TRUE} 
-lib_seqs <- read.table(file="203.norestrict.txt",sep="\t",header=T)
+lib_seqs <- read.table(file=paste(getwd(),"/data/203.norestrict.txt", sep=''), 
+    sep="\t", header=T)
 ```
 
 
@@ -96,7 +97,7 @@ Now we want to add the library info to each sequence.
 
 Using the leader peptide number (`CDS.num`) we can assign the predetermined attributes to each sequence, like RBS identity, codon usage, and secondary structure. 
 
-```{r 01.02-annotate_libs}
+```{r 01.02-annotate_libs, cache=TRUE}
 lib_seqs$CDS.num <- as.integer(lib_seqs$CDS.num)
 
 #split Leader into RBS identities
@@ -150,6 +151,11 @@ ggplot(lib_seqs, aes(x=RBS, y=RBS.len)) + geom_point()
 ```
 
 WT sequences are all 20 bp, and the three designed RBSs are 18, 19, and 21 bp each. Good to know.
+
+```{r 01-save, include=FALSE}
+save(list=ls(),
+    file= paste(getwd(),"/rdata/01.Rdata", sep=''))
+```
 
 
 

@@ -1,4 +1,4 @@
-<link href="http://kevinburke.bitbucket.org','/markdowncss/markdown.css" rel="stylesheet"></link>
+<link href="http://kevinburke.bitbucket.org/markdowncss/markdown.css" rel="stylesheet"></link>
 
 
 
@@ -6,10 +6,7 @@
 
 ## Motivation
 
-Here we are loading all the library member sequences and annotating them based
-on their promoter, RBS, CDS, gene, etc. At the end we check to make sure
-that the library has every item, the sequences all check out, and that the 
-sequences are all the same length.
+Here we are loading all the library member sequences into a DataFrame called `lib_seqs` and annotating them based on their promoter, RBS, CDS, gene, etc. At the end we check to make sure that the library has every item, the sequences all check out, and that the sequences are all the same length.
 
 ## Splitting 
 
@@ -88,7 +85,8 @@ Now we have to read `203.norestrict.txt` into R as a tab-delimited text file.
 
 
 ```r
-lib_seqs <- read.table(file = "203.norestrict.txt", sep = "\t", header = T)
+lib_seqs <- read.table(file = paste(getwd(), "/data/203.norestrict.txt", 
+    sep = ""), sep = "\t", header = T)
 ```
 
 
@@ -239,6 +237,9 @@ ggplot(lib_seqs, aes(x = RBS, y = RBS.len)) + geom_point()
 
 
 WT sequences are all 20 bp, and the three designed RBSs are 18, 19, and 21 bp each. Good to know.
+
+
+
 
 
 

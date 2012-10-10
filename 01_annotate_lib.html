@@ -180,16 +180,13 @@ hljs.initHighlightingOnLoad();
 </head>
 
 <body>
-<p><link href="http://kevinburke.bitbucket.org','/markdowncss/markdown.css" rel="stylesheet"></link></p>
+<p><link href="http://kevinburke.bitbucket.org/markdowncss/markdown.css" rel="stylesheet"></link></p>
 
 <h1>Step 01 - Annotating Library Member Data Frame</h1>
 
 <h2>Motivation</h2>
 
-<p>Here we are loading all the library member sequences and annotating them based<br/>
-on their promoter, RBS, CDS, gene, etc. At the end we check to make sure<br/>
-that the library has every item, the sequences all check out, and that the <br/>
-sequences are all the same length.</p>
+<p>Here we are loading all the library member sequences into a DataFrame called <code>lib_seqs</code> and annotating them based on their promoter, RBS, CDS, gene, etc. At the end we check to make sure that the library has every item, the sequences all check out, and that the sequences are all the same length.</p>
 
 <h2>Splitting</h2>
 
@@ -265,7 +262,8 @@ perl -ne &#39;chomp; s/^&gt;((\w+)-(\w+)-(\d+))/\n$1\t$2\t$3\t$4/;
 
 <p>Now we have to read <code>203.norestrict.txt</code> into R as a tab-delimited text file. </p>
 
-<pre><code class="r">lib_seqs &lt;- read.table(file = &quot;203.norestrict.txt&quot;, sep = &quot;\t&quot;, header = T)
+<pre><code class="r">lib_seqs &lt;- read.table(file = paste(getwd(), &quot;/data/203.norestrict.txt&quot;, 
+    sep = &quot;&quot;), sep = &quot;\t&quot;, header = T)
 </code></pre>
 
 <h3>Annotating <code>lib_seqs</code> DataFrame</h3>
