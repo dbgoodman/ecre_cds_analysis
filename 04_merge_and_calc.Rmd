@@ -1,0 +1,131 @@
+<link href="http://kevinburke.bitbucket.org/markdowncss/markdown.css" rel="stylesheet"></link>
+``` {r setup, include=FALSE}
+opts_chunk$set(warnings = FALSE, message = FALSE)
+require(ggplot2)
+require(plyr)
+require(reshape)
+require(xtable)
+load(file=paste(getwd(),"/rdata/03.Rdata", sep=''))
+```
+
+# Step 04 - Merging Reads and Calculating Levels
+
+## Motivation
+
+Now that we have RNA, DNA, and Protein, we need to merge them into one data
+frame. We called it ngs in 202, so we'll do the same here. There should only
+be one DNA and Protein contig per library member, so that will be easy, but
+there will be multiple RNA contigs owing to different start sites. We will need
+to summarize the RNA data first before we can merge everything togther. 
+
+## Summarize the RNA Data
+
+We will use ddply to count the total number of reads per RNA, and also pick
+the most common start site and the percentage of reads for it. We can discard some of the columns including the Read sequence column and the Offset columns. 
+
+```{r 04.01-summarize_dna_rna cache=T}
+
+rna.summary <- ddply(rna.subset, .(Name), summarize,
+      Count.RNA=sum(Count),
+      Count.A=sum(Count.A),
+      Count.B=sum(Count.B),
+      Offset.RBS= sum((Offset.RBS * Count)/sum(Count)))
+
+dna.summary <- ddply(dna.subset, .(Name), summarize,
+      Count.DNA=sum(Count),
+      Count.A=sum(Count.A),
+      Count.B=sum(Count.B))
+```
+
+## Merge the DNA, RNA, and Protein Data
+
+First we will merge the DNA and Protein, and then add the RNA. From the protein
+data we only need the `Bin` data and the `Count` field. 
+
+```{r 04.02-merge_data cache=T}
+#first, merge protein and DNA
+prot.cols <- c(names(prot.raw)[grepl('Bin',names(prot.raw))],'Count','Name')
+ngs <- merge(dna.summary, prot.raw[,prot.cols], all=T, by="Name", 
+    suffixes=c('.DNA','.Prot'))
+
+#then, add the RNA
+ngs <- merge(ngs, rna.summary, all=T, by="Name", suffixes=c('.DNA','.RNA'))
+
+#Add back library columns
+ngs <- merge(ngs, lib_seqs, all=T, by="Name")
+```
+
+## Calculate RNA Ratio
+
+We calculate the ratio separately for each replicate, then we average them each. We use the read counts for each replicate for RNA and DNA to normalize. 
+
+This code is the same as the 202 analysis, but I've used `log` and `exp` to speed things up. 
+
+
+```{r 04.03-calc_rna_ratio cache=T}
+
+rtotal.rna.a.203 <- 38074822
+rtotal.rna.b.203 <- 27600090
+rtotal.dna.a.203 <- 38606554
+rtotal.dna.b.203 <- 35788869
+
+#this function comes from the 202 analysis, func_data.R
+calc_rna_ratio <- function (df_rna, rna_a_total, rna_b_total, 
+    dna_a_total, dna_b_total, suffix='') {
+    
+    suf <- function (str) paste(str,suffix,sep='')
+    gsuf <- function (str) get(paste(str,suffix,sep=''), pos=df_rna)
+    
+    df_rna[suf('RNA.A')] <- exp(log(gsuf('Count.A.RNA')/rna_a_total) - 
+            log(gsuf('Count.A.DNA')/dna_a_total))
+    df_rna[suf('RNA.B')] <- exp(log(gsuf('Count.B.RNA')/rna_b_total) -
+            log(gsuf('Count.A.DNA')/dna_b_total))
+    df_rna[suf('RNA')] <- (gsuf('RNA.A') + gsuf('RNA.B') / 2)
+    return(df_rna)
+}
+
+ngs <- calc_rna_ratio(ngs, rtotal.rna.a.203, rtotal.rna.b.203,
+    rtotal.dna.a.203, rtotal.dna.b.203)
+```
+
+## Calculate Protein Scores
+
+In order to calculate the scores, we first need to normalized by the numbers of cells sorted into each bin. 
+
+There are two functions here. The first calculated the adjusted the normalized per-bin per-construct read contribution, since each bin had a different number of cells and a different number of reads. The next function uses those normalized bin counts and the average fluorescence level to calculate the protein level. Both of these functions come from the 202 analysis.
+
+```{r 04.04-calc_protein}
+#Percentages of cells sorted into each bin
+prot.bin_pcts <- c(37.93333333, 9.266666667, 10.86666667, 10.16666667, 
+    7.666666667, 5.8, 4.533333333, 3.566666667, 2.833333333, 2.266666667, 
+    1.733333333, 3.2)
+
+#Bin Values for fluorescence ratio sorting as defined in FACSDiva
+bin_breaks <- c(0,1250, 2027, 3287, 5331, 8645, 14019, 22735, 36870, 
+    59791, 96963, 157243, 255000)
+
+
+#calculates adjusted scores from bin means and read per bin percentages
+get_protein_level <- function(ngs_df, bin_pcts, bin_breaks) {
+    #get mean value for each bin
+    bin_means <- (bin_breaks[2:length(bin_breaks)] - 
+        bin_breaks[1:length(bin_breaks)-1]) / 2 + 
+        bin_breaks[1:length(bin_breaks)-1]
+    contrib_per_bin <- get_adj_bins(ngs_df, bin_pcts, bin_breaks) 
+    return( exp( colSums(contrib_per_bin * log(bin_means)) ) )
+}
+
+#calculates normalized per-bin per-construct read contribution
+get_adj_bins <- function(ngs_df, bin_pcts, bin_breaks) {
+    #get total number of reads per bin
+    bin_sums <- colSums(ngs_df[,paste('Bin',c(1:12),sep='.')])
+    #get percentage of reads per construct that fall into each bin
+    read_pcts <- t(ngs_df[,paste('Bin',c(1:12),sep='.')]) / 
+        bin_sums * bin_pcts
+    contrib_per_bin <- t(t(read_pcts) / colSums(read_pcts))
+    return(contrib_per_bin)
+}
+
+ngs$Prot <- get_protein_level(ngs, prot.bin_pcts, bin_breaks)
+
+```

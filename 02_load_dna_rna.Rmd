@@ -8,7 +8,7 @@ require(xtable)
 load(file=paste(getwd(),"/rdata/01.Rdata", sep=''))
 ```
 
-# Step 02: Loading and Processing Bowtie Alignment Data
+# Step 02 - Loading and Processing DNA/RNA Alignment Data
 
 Using the `chiptools` python package that I wrote, I have created a list of unique trimmed and merge reads (contigs) and the number of times they appear in each replicate library. For the 202 analysis I used `rna_table.py` in the chiptools package to create RNA/DNA measurements and remove spurrious contigs. For 203, we will use R instead, so we can be more thorough in checking. Also because while Python is the bee's knees, PANDAS is slow, lame, and missing functionality. 
 
@@ -167,6 +167,7 @@ More info can be found in the online [Bowtie docs](http://bowtie-bio.sourceforge
 (suppressed) Read qualities
 08 Number of other alignments for this RNA
 09 Mismatches (base:N>N, ... )
+
 ```
 
 ## Annotating the Bowtie Output
@@ -188,16 +189,19 @@ For DNA:
 
 #load the raw bowtie output, add library annotation data, and get lengths and 
 # offset info
-load_raw_reads <- function (filename, is.rna) {
-    raw <- read.table(file=filename, sep="\t", header=T, row.names= NULL,
-        stringsAsFactors= F,
-        col.names= c('Read.num', 'Count', 'Count.A', 'Count.B',
-            'Name', 'Offset.L', 'Read.seq', 'Alts', 'Mismatches'))
+col.names= c('Read.num', 'Count', 'Count.A', 'Count.B',
+            'Name', 'Offset.L', 'Read.seq', 'Alts', 'Mismatches')
+
+load_raw_reads <- function (filename, is.rna, col.names) {
+    raw <- read.table(file=filename, sep="\t", header=F, row.names= NULL,
+        stringsAsFactors= F, col.names= col.names)
+        
 
     raw <- merge(raw, lib_seqs, by='Name')
     raw$Read.len <- nchar(raw$Read.seq)
     raw$Offset.R <- raw$Length - raw$Read.len - raw$Offset.L
     
+    raw$Mismatches[is.na(raw$Mismatches)] <- ""
     raw$Mismatches.len <- unlist(lapply(raw$Mismatches, 
         function(x) length(unlist(strsplit(x, ',', fixed=T)))))
     
@@ -205,9 +209,9 @@ load_raw_reads <- function (filename, is.rna) {
 } 
 
 dna.raw <- load_raw_reads(file=paste(getwd(),"/data/203.dna.bowtie",sep=''),
-    is.rna=F)
+    is.rna=F, col.names)
 rna.raw <- load_raw_reads(file=paste(getwd(),"/data/203.rna.bowtie",sep=''),
-    is.rna=T)
+    is.rna=T, col.names)
 
 ```
 
@@ -725,7 +729,7 @@ We're ready to move on, but there are still some odd things going on, and we mig
 
 1. **14 Pairs of Duplicate Constructs**: 28 constructs were duplicates (14 pairs of 2), so I removed them from the construct library, keeping the `Max Rare` for each pair.
 
-2. **15 Construcs with no DNA reads**: They are all BamA sequences. Interestingly, there are no bad alignments for these 15 either. Just no alignments whatesoever. Even more interestingly, there ARE RNA alignments for all of them. Some unique RNA contigs for these 15 have read counts numbering into the hundreds and two over 1000. 
+2. **15 Constructs with no DNA reads**: They are all BamA sequences. Interestingly, there are no bad alignments for these 15 either. Just no alignments whatesoever. Even more interestingly, there ARE RNA alignments for all of them. Some unique RNA contigs for these 15 have read counts numbering into the hundreds and two over 1000. 
 
 3. **17 Constructs with no RNA reads**: There were some filtered RNA contigs for those constructs, but they had low read counts and many had high non-zero R-offsets (i.e. they didn't go to end of the sequence). They are all weak promoter constructs, so they are probably just weakly transcribed.
 
@@ -737,15 +741,12 @@ We're ready to move on, but there are still some odd things going on, and we mig
 
 7. **RNA Mismatches occur predominantly around the end of the Promoter**: Four times the number of mismatches occur 33-40 bases into the constructs, corresponding to the end of the promoters. Could these mismatches be increasing the strengths of the promoters, and increasing the number of reads we see? We could be seeing a similar affect with the DNA above also, although the mechanism is less clear. 
 
-```{r 01-save, include=FALSE}
+```{r 02-save, include=FALSE}
 save(list=c('rna.raw','dna.raw','dna.subset','rna.subset',
             'mismatch_by_count_rna','mismatch_by_count','mm_rna_pos',
             'mm_dna_pos','lib_seqs','rna.missing','dna.missing',
-            'rna.criteria','dna.criteria'),
+            'rna.criteria','dna.criteria','load_raw_reads'),
     file= paste(getwd(),"/rdata/02.Rdata", sep=''))
-
-
 ```
-
 
 
