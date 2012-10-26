@@ -48,8 +48,7 @@ wc -l data/203.prot.bowtie
 ## 14140 (down from 15879 due to checking for partial aligns with perl pipe)
 ```
 
-Out of 14,234 possible sequences, we got 14,140 with protein reads. Let's read
-them into R and take a look. The `load_raw_reads` function comes from step 02.
+Out of 14,234 possible sequences, we got 14,140 with protein reads. 94 constructs have no Protein reads.  Let's read them into R and take a look. The `load_raw_reads` function comes from step 02.
 
 
 
@@ -64,6 +63,23 @@ prot.raw <- load_raw_reads(paste(getwd(), "data/203.prot.bowtie",
 
 
 
+## Conclusions
+
+### Summary of Missing Data
+
+We now have all the raw data. Before we start merging and calculating, we now can see how many constructs are missing from each data set. 
+
+* `94` constructs missing from Protein:
+
+* `17` constructs missing 
+    from RNA
+* `15` constructs missing 
+    from DNA
+* `15` constructs missing from both DNA and Protein 
+* There is no overlap between missing RNA and DNA constructs. 
+* **`111`** costructs in total that are missing RNA, DNA, or Protein. 
+
+This was pretty straightforward. Onto the merging and score calculation.
 
 
 

@@ -231,8 +231,7 @@ wc -l data/203.prot.bowtie
 ## 14140 (down from 15879 due to checking for partial aligns with perl pipe)
 </code></pre>
 
-<p>Out of 14,234 possible sequences, we got 14,140 with protein reads. Let&#39;s read<br/>
-them into R and take a look. The <code>load_raw_reads</code> function comes from step 02.</p>
+<p>Out of 14,234 possible sequences, we got 14,140 with protein reads. 94 constructs have no Protein reads.  Let&#39;s read them into R and take a look. The <code>load_raw_reads</code> function comes from step 02.</p>
 
 <pre><code class="r">col.names = c(&quot;Read.num&quot;, &quot;Count&quot;, paste(&quot;Bin&quot;, c(1:12), sep = &quot;.&quot;), 
     &quot;Name&quot;, &quot;Offset.L&quot;, &quot;Read.seq&quot;, &quot;Alts&quot;, &quot;Mismatches&quot;)
@@ -240,6 +239,25 @@ them into R and take a look. The <code>load_raw_reads</code> function comes from
 prot.raw &lt;- load_raw_reads(paste(getwd(), &quot;data/203.prot.bowtie&quot;, 
     sep = &quot;/&quot;), is.rna = F, col.names = col.names)
 </code></pre>
+
+<h2>Conclusions</h2>
+
+<h3>Summary of Missing Data</h3>
+
+<p>We now have all the raw data. Before we start merging and calculating, we now can see how many constructs are missing from each data set. </p>
+
+<ul>
+<li><p><code>94</code> constructs missing from Protein:</p></li>
+<li><p><code>17</code> constructs missing <br/>
+from RNA</p></li>
+<li><p><code>15</code> constructs missing <br/>
+from DNA</p></li>
+<li><p><code>15</code> constructs missing from both DNA and Protein </p></li>
+<li><p>There is no overlap between missing RNA and DNA constructs. </p></li>
+<li><p><strong><code>111</code></strong> costructs in total that are missing RNA, DNA, or Protein. </p></li>
+</ul>
+
+<p>This was pretty straightforward. Onto the merging and score calculation.</p>
 
 </body>
 

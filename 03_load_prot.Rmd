@@ -56,7 +56,7 @@ wc -l data/203.prot.bowtie
 
 Out of 14,234 possible sequences, we got 14,140 with protein reads. 94 constructs have no Protein reads.  Let's read them into R and take a look. The `load_raw_reads` function comes from step 02.
 
-```{r 03.01-load_protein_reads cache=T}
+```{r 03.01-load_protein_reads, cache=T}
 col.names= c('Read.num', 'Count', paste('Bin',c(1:12),sep='.'),
             'Name', 'Offset.L', 'Read.seq', 'Alts', 'Mismatches')
 
@@ -64,16 +64,31 @@ prot.raw <- load_raw_reads(paste(getwd(),'data/203.prot.bowtie',sep='/'),
     is.rna=F, col.names= col.names)
 ```
 
+## Conclusions
+
+### Summary of Missing Data
+
+We now have all the raw data. Before we start merging and calculating, we now can see how many constructs are missing from each data set. 
+
+* `r dim(lib_seqs)[1] - dim(prot.raw)[1]` constructs missing from Protein
+
+* `r dim(lib_seqs)[1] - length(unique(rna.subset$Name))` constructs missing from RNA
+* `r dim(lib_seqs)[1] - length(unique(dna.subset$Name))` constructs missing     from DNA
+* `r length(lib_seqs$Name[which(!(lib_seqs$Name %in% unique(c(dna.subset$Name, prot.raw$Name))))])` constructs missing from both DNA and Protein 
+* There is no overlap between missing RNA and DNA constructs. 
+* **`r dim(lib_seqs)[1] - dim(prot.raw)[1] + dim(lib_seqs)[1] - length(unique(rna.subset$Name)) `** costructs in total that are missing RNA, DNA, or Protein.
+
+### Dealing with Missing Data
+
+>TODO: I have to add flags like `Missing.RNA`, `Missing.DNA`, `Missing.Prot`, `Missing.Any`, etc. for each of the missing sequences. It will also be important to look for low DNA/low RNA constructs and for constructs with bimodal distributions of reads. 
+
+This was pretty straightforward. Onto the merging and score calculation.
+
 ```{r 03-save, include=FALSE}
-save(list=c('rna.raw','dna.raw','dna.subset','rna.subset',
+save(list=c('dna.subset','rna.subset',
             'mismatch_by_count_rna','mismatch_by_count','mm_rna_pos',
             'mm_dna_pos','lib_seqs','rna.missing','dna.missing',
             'rna.criteria','dna.criteria','prot.raw'),
     file= paste(getwd(),"/rdata/03.Rdata", sep=''))
 ```
 
-## Conclusions
-
-We now have all the raw data. 
-
-This was pretty straightforward. Onto the merging and score calculation.
